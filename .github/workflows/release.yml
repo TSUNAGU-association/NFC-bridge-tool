@@ -25,13 +25,20 @@ jobs:
           dotnet-version: '8.0.x'
 
       - name: Publish Windows x64
+        env:
+          TAG: ${{ github.ref_name }}
         run: |
           rm -rf "$PUBLISH_DIR"
+          VERSION_FULL="${TAG#v}"
+          NUMERIC=$(printf '%s' "$VERSION_FULL" | grep -oE '^[0-9]+(\.[0-9]+){0,3}' | head -n 1)
+          if [ -z "$NUMERIC" ]; then NUMERIC="0.0.0"; fi
           dotnet publish NfcBridgeApp/NfcBridgeApp.csproj \
             -c Release \
             -r win-x64 \
             --self-contained true \
             -p:PublishSingleFile=false \
+            -p:Version="$NUMERIC" \
+            -p:InformationalVersion="$VERSION_FULL" \
             -o "$PUBLISH_DIR"
 
       - name: Verify publish output
