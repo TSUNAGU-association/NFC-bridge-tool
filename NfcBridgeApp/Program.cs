@@ -336,12 +336,62 @@ internal static class Program
                     texts.Add(encoding.GetString(ndef, textOffset, textLen));
                 }
             }
+            else if (tnf == 0x01 && typeLen == 1 && type[0] == 0x55 && payloadLen >= 1)
+            {
+                byte prefixCode = ndef[idx];
+                string prefix = prefixCode < UriPrefixes.Length ? UriPrefixes[prefixCode] : string.Empty;
+                int uriOffset = idx + 1;
+                int uriLen = payloadLen - 1;
+                string suffix = uriLen > 0 ? Encoding.UTF8.GetString(ndef, uriOffset, uriLen) : string.Empty;
+                var uri = prefix + suffix;
+                if (uri.Length > 0) texts.Add(uri);
+            }
 
             idx += payloadLen;
             if (messageEnd) break;
         }
         return texts;
     }
+
+    private static readonly string[] UriPrefixes =
+    {
+        "",
+        "http://www.",
+        "https://www.",
+        "http://",
+        "https://",
+        "tel:",
+        "mailto:",
+        "ftp://anonymous:anonymous@",
+        "ftp://ftp.",
+        "ftps://",
+        "sftp://",
+        "smb://",
+        "nfs://",
+        "ftp://",
+        "dav://",
+        "news:",
+        "telnet://",
+        "imap:",
+        "rtsp://",
+        "urn:",
+        "pop:",
+        "sip:",
+        "sips:",
+        "tftp:",
+        "btspp://",
+        "btl2cap://",
+        "btgoep://",
+        "tcpobex://",
+        "irdaobex://",
+        "file://",
+        "urn:epc:id:",
+        "urn:epc:tag:",
+        "urn:epc:pat:",
+        "urn:epc:raw:",
+        "urn:epc:",
+        "urn:nfc:",
+    };
 
     private static byte[]? Transmit(ICardReader reader, byte[] apdu)
     {
