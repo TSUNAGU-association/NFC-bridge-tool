@@ -47,7 +47,7 @@ internal static class Program
         {
         }
 
-        Log("[APP] shutting down");
+        Log("[APP] 終了処理を開始します");
     }
 
     private static void StartReadWebSocketServer()
@@ -59,16 +59,16 @@ internal static class Program
             socket.OnOpen = () =>
             {
                 ReadSockets[socket.ConnectionInfo.Id] = socket;
-                Log($"[READ] connected origin={socket.ConnectionInfo.Origin} ip={socket.ConnectionInfo.ClientIpAddress}");
+                Log($"[READ] クライアントが接続しました origin={socket.ConnectionInfo.Origin} ip={socket.ConnectionInfo.ClientIpAddress}");
             };
             socket.OnClose = () =>
             {
                 ReadSockets.TryRemove(socket.ConnectionInfo.Id, out _);
-                Log("[READ] disconnected");
+                Log("[READ] クライアントが切断しました");
             };
-            socket.OnError = ex => Log($"[READ] error: {ex.Message}");
+            socket.OnError = ex => Log($"[READ] エラーが発生しました: {ex.Message}");
         });
-        Log($"[READ] listening on {ReadWsAddress}");
+        Log($"[READ] {ReadWsAddress} で待ち受けを開始しました");
     }
 
     private static async Task RunNfcLoopAsync(CancellationToken ct)
@@ -83,15 +83,15 @@ internal static class Program
                 var readerNames = SafeGetReaders(ctx);
                 if (readerNames.Length == 0)
                 {
-                    Log("[NFC] no reader detected, retrying...");
+                    Log("[NFC] リーダーが検出されません。再試行します...");
                     await Task.Delay(ReaderRescanIntervalMs, ct);
                     continue;
                 }
-                Log($"[NFC] readers: {string.Join(", ", readerNames)}");
+                Log($"[NFC] 検出されたリーダー: {string.Join(", ", readerNames)}");
 
                 monitor = MonitorFactory.Instance.Create(SCardScope.System);
                 monitor.CardInserted += OnCardInserted;
-                monitor.MonitorException += (_, ex) => Log($"[NFC] monitor exception: {ex.Message}");
+                monitor.MonitorException += (_, ex) => Log($"[NFC] 監視中に例外が発生しました: {ex.Message}");
                 monitor.Start(readerNames);
 
                 while (!ct.IsCancellationRequested)
@@ -100,7 +100,7 @@ internal static class Program
                     var current = SafeGetReaders(ctx);
                     if (current.Length == 0 || !current.SequenceEqual(readerNames))
                     {
-                        Log("[NFC] reader topology changed; restarting monitor");
+                        Log("[NFC] リーダー構成が変化しました。監視を再起動します");
                         break;
                     }
                 }
@@ -108,7 +108,7 @@ internal static class Program
             catch (OperationCanceledException) { throw; }
             catch (Exception ex)
             {
-                Log($"[NFC] error: {ex.Message}; retrying in {ReaderRescanIntervalMs}ms");
+                Log($"[NFC] エラーが発生しました: {ex.Message}; {ReaderRescanIntervalMs}ms 後に再試行します");
                 try { await Task.Delay(ReaderRescanIntervalMs, ct); } catch (OperationCanceledException) { throw; }
             }
             finally
@@ -137,13 +137,13 @@ internal static class Program
             var result = ReadNdefText(args.ReaderName);
             if (result.Status == ReadTextStatus.NoTextRecord)
             {
-                Log($"[READ] {args.ReaderName}: no NDEF Text record");
+                Log($"[READ] {args.ReaderName}: NDEFテキストレコードが見つかりません");
                 BroadcastReadError(ErrorCodeNoNdefTextRecord);
                 return;
             }
             if (result.Status == ReadTextStatus.ReadFailed)
             {
-                Log($"[READ] {args.ReaderName}: read failed");
+                Log($"[READ] {args.ReaderName}: 読み取りに失敗しました");
                 BroadcastReadError(ErrorCodeReadFailed);
                 return;
             }
@@ -151,15 +151,15 @@ internal static class Program
             var text = result.Text;
             if (!ShouldEmit(text))
             {
-                Log($"[READ] suppressed (dedupe): {Truncate(text)}");
+                Log($"[READ] 重複のため抑制しました: {Truncate(text)}");
                 return;
             }
-            Log($"[READ] -> {ReadSockets.Count} client(s): {Truncate(text)}");
+            Log($"[READ] -> {ReadSockets.Count} 件のクライアントへ送信: {Truncate(text)}");
             BroadcastRead(text);
         }
         catch (Exception ex)
         {
-            Log($"[READ] inserted handler error: {ex.Message}");
+            Log($"[READ] カード読み取り処理でエラーが発生しました: {ex.Message}");
             BroadcastReadError(ErrorCodeReadFailed);
         }
     }
@@ -442,7 +442,7 @@ internal static class Program
 
     private static void BroadcastReadError(string code)
     {
-        Log($"[READ] -> {ReadSockets.Count} client(s): {code}");
+        Log($"[READ] -> {ReadSockets.Count} 件のクライアントへ送信: {code}");
         BroadcastRead(code);
     }
 
@@ -466,40 +466,40 @@ internal static class Program
     {
         if (Environment.GetEnvironmentVariable(SkipUpdateEnvVar) == "1")
         {
-            Log("[UPDATE] skipped via NFC_BRIDGE_SKIP_UPDATE=1");
+            Log("[UPDATE] NFC_BRIDGE_SKIP_UPDATE=1 が設定されているため更新をスキップしました");
             return;
         }
         if (!OperatingSystem.IsWindows())
         {
-            Log("[UPDATE] non-Windows host; auto-update disabled");
+            Log("[UPDATE] Windows以外の環境のため自動更新は無効です");
             return;
         }
 
         try
         {
-            Log("[UPDATE] checking for new release...");
+            Log("[UPDATE] 新しいリリースを確認しています...");
             var release = await FetchLatestReleaseAsync();
             if (release is null)
             {
-                Log("[UPDATE] no compatible release asset found");
+                Log("[UPDATE] 対応するリリースアセットが見つかりません");
                 return;
             }
 
             var current = GetCurrentVersion();
             if (!IsNewer(release.Tag, current))
             {
-                Log($"[UPDATE] up to date (current={current}, latest={release.Tag})");
+                Log($"[UPDATE] 最新版です (現在={current}, 最新={release.Tag})");
                 return;
             }
 
-            Log($"[UPDATE] new version available: {release.Tag} (current={current}); applying...");
+            Log($"[UPDATE] 新しいバージョンが利用可能です: {release.Tag} (現在={current}); 適用しています...");
             await StageAndLaunchUpdateAsync(release);
-            Log("[UPDATE] update staged; restarting...");
+            Log("[UPDATE] 更新の準備が完了しました。再起動します...");
             Environment.Exit(0);
         }
         catch (Exception ex)
         {
-            Log($"[UPDATE] failed: {ex.Message}; continuing with current version");
+            Log($"[UPDATE] 更新に失敗しました: {ex.Message}; 現在のバージョンのまま続行します");
         }
     }
 
@@ -512,7 +512,7 @@ internal static class Program
         using var resp = await http.GetAsync(GitHubLatestReleaseUrl);
         if (!resp.IsSuccessStatusCode)
         {
-            Log($"[UPDATE] release lookup HTTP {(int)resp.StatusCode}");
+            Log($"[UPDATE] リリース情報の取得に失敗 HTTP {(int)resp.StatusCode}");
             return null;
         }
 
@@ -567,7 +567,7 @@ internal static class Program
         var zipPath = Path.Combine(staging, "release.zip");
         Directory.CreateDirectory(staging);
 
-        Log($"[UPDATE] downloading {release.DownloadUrl}");
+        Log($"[UPDATE] ダウンロード中 {release.DownloadUrl}");
         using (var http = new HttpClient { Timeout = TimeSpan.FromMinutes(5) })
         {
             http.DefaultRequestHeaders.UserAgent.ParseAdd(UpdateUserAgent);
@@ -576,7 +576,7 @@ internal static class Program
             await stream.CopyToAsync(fs);
         }
 
-        Log($"[UPDATE] extracting to {extractDir}");
+        Log($"[UPDATE] {extractDir} に展開しています");
         ZipFile.ExtractToDirectory(zipPath, extractDir);
 
         var exePath = Path.Combine(installDir, "NfcBridgeApp.exe");
