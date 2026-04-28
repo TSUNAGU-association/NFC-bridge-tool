@@ -12,6 +12,8 @@ jobs:
   build-release:
     name: Build Windows x64 release
     runs-on: ubuntu-latest
+    env:
+      PUBLISH_DIR: dist-multi
 
     steps:
       - name: Checkout
@@ -24,12 +26,22 @@ jobs:
 
       - name: Publish Windows x64
         run: |
+          rm -rf "$PUBLISH_DIR"
           dotnet publish NfcBridgeApp/NfcBridgeApp.csproj \
             -c Release \
             -r win-x64 \
             --self-contained true \
             -p:PublishSingleFile=false \
-            -o publish/win-x64
+            -o "$PUBLISH_DIR"
+
+      - name: Verify publish output
+        shell: bash
+        run: |
+          test -f "$PUBLISH_DIR/NfcBridgeApp.exe"
+          test -f "$PUBLISH_DIR/NfcBridgeApp.pdb"
+          test -f "$PUBLISH_DIR/NfcBridgeApp.dll"
+          test -f "$PUBLISH_DIR/NfcBridgeApp.deps.json"
+          test -f "$PUBLISH_DIR/NfcBridgeApp.runtimeconfig.json"
 
       - name: Package release zip
         id: package
@@ -37,7 +49,9 @@ jobs:
         run: |
           safe_tag="${GITHUB_REF_NAME//\//-}"
           zip_name="NfcBridgeApp-win-x64-${safe_tag}.zip"
-          (cd publish/win-x64 && zip -r "../../${zip_name}" .)
+          (cd "$PUBLISH_DIR" && zip -r "../${zip_name}" .)
+          unzip -l "$zip_name" | grep -q 'NfcBridgeApp.exe'
+          unzip -l "$zip_name" | grep -q 'NfcBridgeApp.pdb'
           echo "zip_name=${zip_name}" >> "$GITHUB_OUTPUT"
 
       - name: Create or update GitHub Release
@@ -52,5 +66,5 @@ jobs:
             gh release create "$GITHUB_REF_NAME" "$ZIP_NAME" \
               --repo "$GITHUB_REPOSITORY" \
               --title "$GITHUB_REF_NAME" \
-              --notes "Windows x64 build for ${GITHUB_REF_NAME}."
+              --notes "Windows x64 multi-file publish build for ${GITHUB_REF_NAME}. Download the attached ${ZIP_NAME}; GitHub's automatically generated source code zip does not contain build output."
           fi
