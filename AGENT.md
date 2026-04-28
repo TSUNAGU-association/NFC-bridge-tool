@@ -74,6 +74,7 @@ ws.onmessage = (event) => console.log(event.data);
 バージョンは csproj の `<Version>` で定義し、リリースビルドではタグ名から `release.yml` が `-p:Version` を上書きします。
 
 起動直後に GitHub Releases (`TSUNAGU-association/NFC-bridge-tool`) の `latest` を確認し、新しいバージョンがあれば自動で適用します。
+最新版だった場合は管理ダッシュボード (`https://admin.tl.tsunagu-sep.org/admin/dashboard`) を既定ブラウザで自動的に開きます。更新適用時は再起動後の起動で同じフローによりブラウザが開きます。
 
 - 取得元: `https://api.github.com/repos/TSUNAGU-association/NFC-bridge-tool/releases/latest`
 - 対象アセット: `NfcBridgeApp-win-x64-*.zip`

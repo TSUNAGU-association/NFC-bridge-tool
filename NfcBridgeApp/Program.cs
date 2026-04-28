@@ -23,6 +23,8 @@ internal static class Program
     private const string SkipUpdateEnvVar = "NFC_BRIDGE_SKIP_UPDATE";
     private const string ReleaseAssetPrefix = "NfcBridgeApp-win-x64-";
 
+    private const string DashboardUrl = "https://admin.tl.tsunagu-sep.org/admin/dashboard";
+
     private static readonly ConcurrentDictionary<Guid, IWebSocketConnection> ReadSockets = new();
     private static readonly object DedupLock = new();
     private static string? _lastPayload;
@@ -38,6 +40,7 @@ internal static class Program
         await CheckAndApplyUpdateAsync();
 
         StartReadWebSocketServer();
+        OpenDashboardUrl();
 
         try
         {
@@ -449,6 +452,39 @@ internal static class Program
     private static string Truncate(string s) => s.Length <= 60 ? s : s[..60] + "...";
 
     private static void Log(string msg) => Console.WriteLine($"{DateTime.Now:HH:mm:ss} {msg}");
+
+    private static void OpenDashboardUrl()
+    {
+        try
+        {
+            if (OperatingSystem.IsWindows())
+            {
+                Process.Start(new ProcessStartInfo
+                {
+                    FileName = DashboardUrl,
+                    UseShellExecute = true,
+                });
+            }
+            else if (OperatingSystem.IsMacOS())
+            {
+                Process.Start("open", DashboardUrl);
+            }
+            else if (OperatingSystem.IsLinux())
+            {
+                Process.Start("xdg-open", DashboardUrl);
+            }
+            else
+            {
+                Log($"[APP] このOSではブラウザを自動で開けません: {DashboardUrl}");
+                return;
+            }
+            Log($"[APP] ダッシュボードを開きました: {DashboardUrl}");
+        }
+        catch (Exception ex)
+        {
+            Log($"[APP] ダッシュボードの起動に失敗しました: {ex.Message}");
+        }
+    }
 
     private static string GetCurrentVersion()
     {
