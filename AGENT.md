@@ -25,6 +25,8 @@ dotnet publish NfcBridgeApp/NfcBridgeApp.csproj -c Release -r win-x64 --self-con
 ## Release
 
 タグを push すると GitHub Actions が Windows x64 向けに publish し、zip を GitHub Release に添付します。
+添付される `NfcBridgeApp-win-x64-<tag>.zip` は上記の `dist-multi/` と同じ multi-file publish 成果物で、`NfcBridgeApp.exe` と `NfcBridgeApp.pdb` を含みます。
+GitHub が自動生成する `Source code (zip)` / `Source code (tar.gz)` はソース一式であり、ビルド成果物は含みません。
 
 ```sh
 git tag v0.1.0
