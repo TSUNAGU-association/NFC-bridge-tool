@@ -1,84 +1,78 @@
-# NFC Bridge App — 実装計画
+# NFC Bridge App — 起動時バージョン表示 + 自動更新
 
 ## ゴール
-Mac で開発し、Windows (x64) で動作するローカルNFC中継アプリ。
-PCSC準拠リーダー（PaSori等）で NDEF Text record を読み取り、ローカルWebSocketで配信する。
+- 起動時に現在バージョンをログ出力する
+- 起動時に GitHub Releases の最新版をチェックし、新しければダウンロード→自動置き換え→再起動する
 
-## 仕様
-- WebSocket: `ws://127.0.0.1:8080`
-- カード検知 → NDEF Text record の文字列をそのまま broadcast
-- 二重読み込み防止: 同一 payload + 500ms 以内は破棄
-- リーダー切断/再接続: 自動復帰（監視ループ）
-- 書き込み用 WebSocket (`ws://127.0.0.1:8090`) は起動しない
-- 配布形態: `dotnet publish NfcBridgeApp/NfcBridgeApp.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=false -o dist-multi`
+## 設計
 
-## 技術スタック
-- .NET 8.0 (LTS)
-- Fleck — 軽量 WebSocket サーバ
-- PCSC — Windows のスマートカード API ラッパー
-  - 注: PCSC は Windows でのみ動作（winscard.dll 依存）。Mac 上ではビルドのみ可能、実行は Windows 必須。
+### バージョン埋め込み
+- `NfcBridgeApp.csproj` に `<Version>1.2.0</Version>` を追加（最新タグに合わせる）。
+- `release.yml` で publish 時に `-p:Version=<tag without v>` を渡し、リリースビルドではタグ名がバージョンになるようにする。
+  - タグが `vX.Y.Z` 以外（pre-release suffix 等）の場合に備えて、`X.Y.Z` 部分を抽出して `Version` に、フル文字列を `InformationalVersion` に入れる。
+- 起動ログ: `[APP] NfcBridgeApp v1.2.0`
+
+### 更新チェック / 適用フロー（Windows のみ）
+1. アプリ起動最初に `https://api.github.com/repos/TSUNAGU-association/NFC-bridge-tool/releases/latest` を `HttpClient`(timeout 5s) で取得。
+2. レスポンスから `tag_name` と `assets[].browser_download_url`（`NfcBridgeApp-win-x64-*.zip` で始まるもの）を読む。
+3. semver 比較で現バージョンより新しければ更新処理に進む。
+4. 一時ディレクトリ（`%TEMP%/NfcBridgeApp-update-<guid>/`）に zip をダウンロードし展開。
+5. 自プロセス PID を埋め込んだ `apply-update.bat` を生成:
+   - `tasklist` でこのプロセスが終わるまで待つ
+   - `robocopy /E` で展開先から `AppContext.BaseDirectory` に上書きコピー
+   - 新しい `NfcBridgeApp.exe` を `start` で起動
+   - 一時ディレクトリを削除
+6. `cmd /c start` で bat を hidden 起動して `Environment.Exit(0)`。
+7. 失敗（ネットワーク・JSON・展開・コピー）時は警告ログを出して通常起動を続行。
+
+### 安全装置
+- 環境変数 `NFC_BRIDGE_SKIP_UPDATE=1` でスキップ可能。
+- 非 Windows（Mac での dev 実行）はチェック自体スキップ。
+- 既存ユーザー追加ファイルを消さないため `robocopy /MIR` ではなく `/E` を使う。
+- 例外は全てキャッチして起動継続。
 
 ## タスク
-- [x] tasks/todo.md に計画を書く（このファイル）
-- [x] dotnet-install.sh で SDK 8.0.420 を `~/.dotnet` に導入（cask は sudo 要のため不採用）
-- [x] `dotnet new console -n NfcBridgeApp` でプロジェクト作成
-- [x] `dotnet add package Fleck` (1.2.0) / `PCSC` (7.0.1)
-- [x] csproj は `net8.0` のまま据え置き（PCSC v7 は netstandard 互換、Windows 実行時のみ winscard.dll を解決）
-- [x] Program.cs を実装
-  - [x] WebSocketServer 起動 + クライアント管理（ConcurrentDictionary）
-  - [x] PCSC コンテキスト確立 + リーダ列挙
-  - [x] MonitorFactory で CardInserted を購読
-  - [x] NDEF Type 4 / Type 2 から Text record を読み取り
-  - [x] 二重読み込み防止（直近 payload + 500ms ウィンドウ）
-  - [x] リーダ切断時の再試行ループ（3秒ごとにトポロジ再確認）
-  - [x] Ctrl+C / プロセス終了でクリーンシャットダウン
-- [x] `dotnet publish NfcBridgeApp/NfcBridgeApp.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=false -o dist-multi` を実行
-- [x] 生成された Windows x64 配布物を確認
-- [x] レビュー欄に結果と既知の制約を記載
-
-## 既知の制約
-- PCSC は Windows API 依存 → Mac でランタイム動作確認は不可。Windows での実機テストが必要。
-- Mac 上ではビルドのみ検証する（`dotnet build`が通ること）。
-- `RuntimeIdentifier=win-x64` でクロスコンパイルするため、Mac 上でも publish 自体は通る想定。
+- [x] `NfcBridgeApp.csproj` に `<Version>2.0.0</Version>` を追加
+- [x] `Program.cs` に
+  - [x] 起動時バージョン表示 `[APP] NfcBridgeApp v<ver>`
+  - [x] `CheckAndApplyUpdateAsync` 実装
+  - [x] GitHub API 取得 / semver 比較 / zip ダウンロード / 展開 / bat 生成 / 自プロセス終了
+- [x] `.github/workflows/release.yml` で `Version` / `InformationalVersion` をタグから注入
+- [x] `AGENT.md` を更新（バージョン表示と更新動作を記述）
+- [x] Mac 上で `dotnet build` と `dotnet publish -r win-x64` が通ることを確認（0 警告 / 0 エラー）
 
 ## レビュー
 
-### 成果物
-- ソース: `NfcBridgeApp/Program.cs`
-- 配布バイナリ: `NfcBridgeApp/bin/Release/net8.0/win-x64/publish/NfcBridgeApp.exe`
-  - Windows x64 console app
-  - multi-file / .NET ランタイム同梱（要件: 配布先に .NET 不要）
+### 変更ファイル
+- `NfcBridgeApp/NfcBridgeApp.csproj`: `<Version>1.2.0</Version>` 追加
+- `NfcBridgeApp/Program.cs`:
+  - 起動時に `[APP] NfcBridgeApp v<ver>` を出力
+  - `CheckAndApplyUpdateAsync` で `/releases/latest` を取得（5s timeout）
+  - `NfcBridgeApp-win-x64-*.zip` アセットを semver 比較（`v` prefix・pre-release suffix を除去）
+  - 新バージョンなら `%TEMP%` に zip を DL → 展開 → `apply-update.bat` を hidden 起動 → `Environment.Exit(0)`
+  - bat は `tasklist` で自プロセスの終了を待ち `robocopy /E` で上書き、新 exe を `start` で再起動
+  - 例外は全て catch してログのみ出して通常起動継続
+  - `OperatingSystem.IsWindows()` ガードで Mac 実行時はスキップ
+  - 環境変数 `NFC_BRIDGE_SKIP_UPDATE=1` でバイパス可
+- `.github/workflows/release.yml`:
+  - タグから `vX.Y.Z` の数値部を抽出して `-p:Version` に、フル文字列を `-p:InformationalVersion` に渡す
+- `AGENT.md`: バージョン表示と自動更新の挙動・環境変数を追記、`[UPDATE]` ログ prefix を追加
 
-### 検証状況
-- [x] Mac 上で `dotnet build` 通過（0 警告 / 0 エラー）
-- [x] Mac 上で `dotnet publish -r win-x64 --self-contained` 通過
-- [ ] Windows + PaSori 等の実機での動作確認（PCSC は winscard.dll 依存で Mac では実行不可）
+### 既知の制約
+- Windows 実機での `tasklist` / `robocopy` 動作は未検証（Mac 上では PCSC ともども動作試験不可）。
+- `robocopy /E` を使うので、旧バージョンで存在し新版で削除されたファイルは残存する（実害は小さい）。`/MIR` にすると同 dir に置かれた利用者ファイルも消えてしまうため不採用。
+- `/releases/latest` は GitHub の仕様上 prerelease/draft を除外するため、`v1.3.0-beta` 等は対象にならない。意図的。
+- `NFC_BRIDGE_SKIP_UPDATE=1` 以外の停止手段は無し。社内端末で更新を一時停止したい場合はこの env var で制御する。
 
 ### 動作確認手順（Windows 側）
-1. `NfcBridgeApp.exe` を Windows にコピーして起動
-2. ブラウザの DevTools コンソールで:
-   ```js
-   const ws = new WebSocket('ws://127.0.0.1:8080');
-   ws.onmessage = e => console.log('NDEF text:', e.data);
+1. `NfcBridgeApp.exe` 起動
+2. 標準出力に下記が出ることを確認
    ```
-3. リーダにカードをかざし、NDEF Text record の文字列がログ出力されること
-4. 同一カードを連続でかざしても 500ms 以内は重複送信されないこと
-5. リーダを USB から抜く → 3 秒以内に「reader topology changed」、再接続で復帰すること
-
-### 既知の制約 / 今後の改善余地
-- **CORS / Origin フィルタ**: 現状 Fleck はすべての Origin を受け入れる。本番運用で特定ドメインに絞る場合は `OnOpen` で `socket.ConnectionInfo.Origin` を検査して `Close()` する処理を追加。
-- **WSS（TLS）非対応**: ローカル loopback のみのため平文 ws のまま。リモート公開しないこと。
-- **リーダ複数台**: 現状すべての検知リーダを並列に監視。同時刻に複数台で別カード読み取り時の挙動は未テスト。
-- **設定の外出し**: ポート番号・dedupe ウィンドウは定数。必要なら `appsettings.json` 化。
-- **macOS 実行**: PCSC v7 は pcsclite 経由で macOS でも動く。`-r osx-arm64` で publish すれば Mac でも動作試験可能（要 pcsclite + USBリーダ）。
-
-### 起動コマンド（Windows）
-```
-NfcBridgeApp.exe
-```
-ログ:
-```
-HH:MM:SS [READ] listening on ws://127.0.0.1:8080
-HH:MM:SS [NFC] readers: SONY FeliCa Port/PaSoRi 3.0 0
-HH:MM:SS [READ] -> 1 client(s): sample text
-```
+   HH:MM:SS [APP] NfcBridgeApp v1.2.0
+   HH:MM:SS [UPDATE] checking for new release...
+   HH:MM:SS [UPDATE] up to date (current=1.2.0, latest=v1.2.0)
+   HH:MM:SS [READ] listening on ws://127.0.0.1:8080
+   ```
+3. 古いバイナリを `v1.0.0` 想定で実行 → 自動で `v1.2.0` に更新され、再起動後に新バージョンログが出ること
+4. ネットワーク遮断状態で起動 → `[UPDATE] failed: ...` と出て通常起動が継続すること
+5. `set NFC_BRIDGE_SKIP_UPDATE=1` で起動 → `[UPDATE] skipped via NFC_BRIDGE_SKIP_UPDATE=1` が出てチェックされないこと

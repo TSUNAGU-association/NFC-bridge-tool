@@ -68,6 +68,20 @@ ws.onmessage = (event) => console.log(event.data);
 - リーダー一覧が変化した場合は monitor を再起動します。
 - `Ctrl+C` またはプロセス終了時にシャットダウン処理へ入ります。
 
+## バージョン表示と自動更新
+
+起動時に現在のバージョンを `[APP] NfcBridgeApp v<version>` の形式で出力します。
+バージョンは csproj の `<Version>` で定義し、リリースビルドではタグ名から `release.yml` が `-p:Version` を上書きします。
+
+起動直後に GitHub Releases (`TSUNAGU-association/NFC-bridge-tool`) の `latest` を確認し、新しいバージョンがあれば自動で適用します。
+
+- 取得元: `https://api.github.com/repos/TSUNAGU-association/NFC-bridge-tool/releases/latest`
+- 対象アセット: `NfcBridgeApp-win-x64-*.zip`
+- 動作対象: Windows のみ（macOS では skip）
+- フロー: zip を `%TEMP%/NfcBridgeApp-update-<guid>/` に DL → 展開 → `apply-update.bat` を hidden 起動 → 自プロセス終了 → bat が `tasklist` で終了を待ち、`robocopy /E` でインストール先を上書き → 新 exe を起動して staging を削除。
+- 失敗時は警告ログのみ出して通常起動を続行します。
+- 環境変数 `NFC_BRIDGE_SKIP_UPDATE=1` で更新チェックをスキップできます。
+
 ## ログ
 
 ログは標準出力に出ます。主な prefix は以下です。
@@ -75,6 +89,7 @@ ws.onmessage = (event) => console.log(event.data);
 - `[READ]`: 読み取り WebSocket、読み取り処理
 - `[NFC]`: リーダー検出、カード monitor
 - `[APP]`: アプリのライフサイクル
+- `[UPDATE]`: 起動時の自動更新チェック / 適用
 
 ## 注意点
 

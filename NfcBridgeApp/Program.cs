@@ -1,5 +1,10 @@
 using System.Collections.Concurrent;
+using System.Diagnostics;
+using System.IO.Compression;
+using System.Net.Http.Headers;
+using System.Reflection;
 using System.Text;
+using System.Text.Json;
 using Fleck;
 using PCSC;
 using PCSC.Monitoring;
@@ -12,6 +17,12 @@ internal static class Program
     private const string ErrorCodeNoNdefTextRecord = "ERR_NO_NDEF_TEXT_RECORD";
     private const string ErrorCodeReadFailed = "ERR_NFC_READ_FAILED";
 
+    private const string GitHubLatestReleaseUrl =
+        "https://api.github.com/repos/TSUNAGU-association/NFC-bridge-tool/releases/latest";
+    private const string UpdateUserAgent = "NfcBridgeApp-AutoUpdater";
+    private const string SkipUpdateEnvVar = "NFC_BRIDGE_SKIP_UPDATE";
+    private const string ReleaseAssetPrefix = "NfcBridgeApp-win-x64-";
+
     private static readonly ConcurrentDictionary<Guid, IWebSocketConnection> ReadSockets = new();
     private static readonly object DedupLock = new();
     private static string? _lastPayload;
@@ -22,6 +33,9 @@ internal static class Program
         using var cts = new CancellationTokenSource();
         Console.CancelKeyPress += (_, e) => { e.Cancel = true; cts.Cancel(); };
         AppDomain.CurrentDomain.ProcessExit += (_, _) => cts.Cancel();
+
+        Log($"[APP] NfcBridgeApp v{GetCurrentVersion()}");
+        await CheckAndApplyUpdateAsync();
 
         StartReadWebSocketServer();
 
@@ -435,6 +449,167 @@ internal static class Program
     private static string Truncate(string s) => s.Length <= 60 ? s : s[..60] + "...";
 
     private static void Log(string msg) => Console.WriteLine($"{DateTime.Now:HH:mm:ss} {msg}");
+
+    private static string GetCurrentVersion()
+    {
+        var asm = typeof(Program).Assembly;
+        var info = asm.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion;
+        if (!string.IsNullOrWhiteSpace(info))
+        {
+            var plus = info.IndexOf('+');
+            return plus >= 0 ? info[..plus] : info;
+        }
+        return asm.GetName().Version?.ToString(3) ?? "0.0.0";
+    }
+
+    private static async Task CheckAndApplyUpdateAsync()
+    {
+        if (Environment.GetEnvironmentVariable(SkipUpdateEnvVar) == "1")
+        {
+            Log("[UPDATE] skipped via NFC_BRIDGE_SKIP_UPDATE=1");
+            return;
+        }
+        if (!OperatingSystem.IsWindows())
+        {
+            Log("[UPDATE] non-Windows host; auto-update disabled");
+            return;
+        }
+
+        try
+        {
+            Log("[UPDATE] checking for new release...");
+            var release = await FetchLatestReleaseAsync();
+            if (release is null)
+            {
+                Log("[UPDATE] no compatible release asset found");
+                return;
+            }
+
+            var current = GetCurrentVersion();
+            if (!IsNewer(release.Tag, current))
+            {
+                Log($"[UPDATE] up to date (current={current}, latest={release.Tag})");
+                return;
+            }
+
+            Log($"[UPDATE] new version available: {release.Tag} (current={current}); applying...");
+            await StageAndLaunchUpdateAsync(release);
+            Log("[UPDATE] update staged; restarting...");
+            Environment.Exit(0);
+        }
+        catch (Exception ex)
+        {
+            Log($"[UPDATE] failed: {ex.Message}; continuing with current version");
+        }
+    }
+
+    private static async Task<ReleaseInfo?> FetchLatestReleaseAsync()
+    {
+        using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(5) };
+        http.DefaultRequestHeaders.UserAgent.ParseAdd(UpdateUserAgent);
+        http.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/vnd.github+json"));
+
+        using var resp = await http.GetAsync(GitHubLatestReleaseUrl);
+        if (!resp.IsSuccessStatusCode)
+        {
+            Log($"[UPDATE] release lookup HTTP {(int)resp.StatusCode}");
+            return null;
+        }
+
+        var json = await resp.Content.ReadAsStringAsync();
+        using var doc = JsonDocument.Parse(json);
+        var root = doc.RootElement;
+        var tag = root.TryGetProperty("tag_name", out var tagProp) ? tagProp.GetString() : null;
+        if (string.IsNullOrWhiteSpace(tag)) return null;
+
+        if (!root.TryGetProperty("assets", out var assets) || assets.ValueKind != JsonValueKind.Array)
+            return null;
+
+        foreach (var asset in assets.EnumerateArray())
+        {
+            var name = asset.TryGetProperty("name", out var n) ? n.GetString() : null;
+            var url = asset.TryGetProperty("browser_download_url", out var u) ? u.GetString() : null;
+            if (name is null || url is null) continue;
+            if (name.StartsWith(ReleaseAssetPrefix, StringComparison.OrdinalIgnoreCase) &&
+                name.EndsWith(".zip", StringComparison.OrdinalIgnoreCase))
+            {
+                return new ReleaseInfo(tag, url);
+            }
+        }
+        return null;
+    }
+
+    private static bool IsNewer(string latestTag, string current)
+    {
+        var latestNum = NormalizeVersion(latestTag);
+        var currentNum = NormalizeVersion(current);
+        if (!Version.TryParse(latestNum, out var lv)) return false;
+        if (!Version.TryParse(currentNum, out var cv)) return false;
+        return lv > cv;
+    }
+
+    private static string NormalizeVersion(string s)
+    {
+        s = s.Trim();
+        if (s.StartsWith('v') || s.StartsWith('V')) s = s[1..];
+        var dash = s.IndexOf('-');
+        if (dash >= 0) s = s[..dash];
+        var plus = s.IndexOf('+');
+        if (plus >= 0) s = s[..plus];
+        return s;
+    }
+
+    private static async Task StageAndLaunchUpdateAsync(ReleaseInfo release)
+    {
+        var installDir = Path.GetFullPath(AppContext.BaseDirectory).TrimEnd(Path.DirectorySeparatorChar);
+        var staging = Path.Combine(Path.GetTempPath(), $"NfcBridgeApp-update-{Guid.NewGuid():N}");
+        var extractDir = Path.Combine(staging, "extracted");
+        var zipPath = Path.Combine(staging, "release.zip");
+        Directory.CreateDirectory(staging);
+
+        Log($"[UPDATE] downloading {release.DownloadUrl}");
+        using (var http = new HttpClient { Timeout = TimeSpan.FromMinutes(5) })
+        {
+            http.DefaultRequestHeaders.UserAgent.ParseAdd(UpdateUserAgent);
+            await using var fs = File.Create(zipPath);
+            await using var stream = await http.GetStreamAsync(release.DownloadUrl);
+            await stream.CopyToAsync(fs);
+        }
+
+        Log($"[UPDATE] extracting to {extractDir}");
+        ZipFile.ExtractToDirectory(zipPath, extractDir);
+
+        var exePath = Path.Combine(installDir, "NfcBridgeApp.exe");
+        var batPath = Path.Combine(staging, "apply-update.bat");
+        var pid = Environment.ProcessId;
+
+        var bat = $@"@echo off
+setlocal
+:wait
+tasklist /FI ""PID eq {pid}"" 2>NUL | find ""{pid}"" >NUL
+if not errorlevel 1 (
+    timeout /t 1 /nobreak >NUL
+    goto wait
+)
+robocopy ""{extractDir}"" ""{installDir}"" /E /NFL /NDL /NJH /NJS /NP /R:3 /W:1 >NUL
+if %ERRORLEVEL% GEQ 8 (
+    exit /b %ERRORLEVEL%
+)
+start """" ""{exePath}""
+rmdir /S /Q ""{staging}""
+endlocal
+";
+        await File.WriteAllTextAsync(batPath, bat, Encoding.ASCII);
+
+        Process.Start(new ProcessStartInfo
+        {
+            FileName = batPath,
+            UseShellExecute = true,
+            WindowStyle = ProcessWindowStyle.Hidden,
+        });
+    }
+
+    private sealed record ReleaseInfo(string Tag, string DownloadUrl);
 
     private enum ReadTextStatus
     {
