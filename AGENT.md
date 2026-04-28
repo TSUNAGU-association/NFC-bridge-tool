@@ -48,8 +48,11 @@ git push origin v0.1.0
 - NFC タグ挿入時に NDEF Text record を読み取ります。
 - 読み取った文字列を、接続中の全クライアントへそのまま broadcast します。
 - NDEF Type 4 を先に試し、失敗した場合は NDEF Type 2 を試します。
-- NDEF Text record が存在しないカードは送信対象外です。
+- NDEF Text record が存在しないカードはエラーコードを送信します。
 - 同一 payload は 500ms 以内の連続検出を重複として抑制します。
+- 読み取り失敗時は `ws://127.0.0.1:8080` にエラーコード文字列を送信します。
+  - `ERR_NO_NDEF_TEXT_RECORD`: 読み取りはできたが NDEF Text record が存在しない
+  - `ERR_NFC_READ_FAILED`: カードとの通信失敗、途中までしか読めない、または読み取り処理中の例外
 
 読み取りクライアント例:
 

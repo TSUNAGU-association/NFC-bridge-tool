@@ -9,6 +9,8 @@ internal static class Program
     private const string ReadWsAddress = "ws://127.0.0.1:8080";
     private const int DedupWindowMs = 500;
     private const int ReaderRescanIntervalMs = 3000;
+    private const string ErrorCodeNoNdefTextRecord = "ERR_NO_NDEF_TEXT_RECORD";
+    private const string ErrorCodeReadFailed = "ERR_NFC_READ_FAILED";
 
     private static readonly ConcurrentDictionary<Guid, IWebSocketConnection> ReadSockets = new();
     private static readonly object DedupLock = new();
@@ -118,12 +120,21 @@ internal static class Program
     {
         try
         {
-            var text = ReadNdefText(args.ReaderName);
-            if (string.IsNullOrEmpty(text))
+            var result = ReadNdefText(args.ReaderName);
+            if (result.Status == ReadTextStatus.NoTextRecord)
             {
                 Log($"[READ] {args.ReaderName}: no NDEF Text record");
+                BroadcastReadError(ErrorCodeNoNdefTextRecord);
                 return;
             }
+            if (result.Status == ReadTextStatus.ReadFailed)
+            {
+                Log($"[READ] {args.ReaderName}: read failed");
+                BroadcastReadError(ErrorCodeReadFailed);
+                return;
+            }
+
+            var text = result.Text;
             if (!ShouldEmit(text))
             {
                 Log($"[READ] suppressed (dedupe): {Truncate(text)}");
@@ -135,45 +146,60 @@ internal static class Program
         catch (Exception ex)
         {
             Log($"[READ] inserted handler error: {ex.Message}");
+            BroadcastReadError(ErrorCodeReadFailed);
         }
     }
 
-    private static string ReadNdefText(string readerName)
+    private static ReadTextResult ReadNdefText(string readerName)
     {
         using var ctx = ContextFactory.Instance.Establish(SCardScope.System);
         using var reader = ctx.ConnectReader(readerName, SCardShareMode.Shared, SCardProtocol.Any);
 
-        var ndef = TryReadType4(reader) ?? TryReadType2(reader);
-        if (ndef is null || ndef.Length == 0) return string.Empty;
+        var type4 = TryReadType4(reader);
+        var type2 = type4.Status == NdefReadStatus.Success ? default : TryReadType2(reader);
+        var ndef = type4.Status == NdefReadStatus.Success ? type4.Data : type2.Data;
+        if (ndef is null || ndef.Length == 0)
+        {
+            if (type4.Status == NdefReadStatus.ReadFailed || type2.Status == NdefReadStatus.ReadFailed)
+            {
+                return new ReadTextResult(ReadTextStatus.ReadFailed, string.Empty);
+            }
+
+            return new ReadTextResult(ReadTextStatus.NoTextRecord, string.Empty);
+        }
 
         var texts = ExtractTextRecords(ndef);
-        return texts.Count == 0 ? string.Empty : string.Join("\n", texts);
+        return texts.Count == 0
+            ? new ReadTextResult(ReadTextStatus.NoTextRecord, string.Empty)
+            : new ReadTextResult(ReadTextStatus.Success, string.Join("\n", texts));
     }
 
-    private static byte[]? TryReadType4(ICardReader reader)
+    private static NdefReadResult TryReadType4(ICardReader reader)
     {
         try
         {
             var resp = Transmit(reader, new byte[] { 0x00, 0xA4, 0x04, 0x00, 0x07, 0xD2, 0x76, 0x00, 0x00, 0x85, 0x01, 0x01, 0x00 });
-            if (!IsOk(resp)) return null;
+            if (resp is null) return new NdefReadResult(NdefReadStatus.ReadFailed, null);
+            if (!IsOk(resp)) return new NdefReadResult(NdefReadStatus.NotFound, null);
 
             resp = Transmit(reader, new byte[] { 0x00, 0xA4, 0x00, 0x0C, 0x02, 0xE1, 0x03 });
-            if (!IsOk(resp)) return null;
+            if (!IsOk(resp)) return new NdefReadResult(NdefReadStatus.ReadFailed, null);
 
             resp = Transmit(reader, new byte[] { 0x00, 0xB0, 0x00, 0x00, 0x0F });
-            if (!IsOk(resp) || resp!.Length < 15 + 2) return null;
+            if (!IsOk(resp) || resp!.Length < 15 + 2) return new NdefReadResult(NdefReadStatus.ReadFailed, null);
             int maxLe = ((resp[3] << 8) | resp[4]) & 0xFFFF;
             if (maxLe <= 0 || maxLe > 0xF6) maxLe = 0xF6;
             byte ndefIdHi = resp[9];
             byte ndefIdLo = resp[10];
 
             resp = Transmit(reader, new byte[] { 0x00, 0xA4, 0x00, 0x0C, 0x02, ndefIdHi, ndefIdLo });
-            if (!IsOk(resp)) return null;
+            if (!IsOk(resp)) return new NdefReadResult(NdefReadStatus.ReadFailed, null);
 
             resp = Transmit(reader, new byte[] { 0x00, 0xB0, 0x00, 0x00, 0x02 });
-            if (!IsOk(resp) || resp!.Length < 4) return null;
+            if (!IsOk(resp) || resp!.Length < 4) return new NdefReadResult(NdefReadStatus.ReadFailed, null);
             int ndefLen = (resp[0] << 8) | resp[1];
-            if (ndefLen <= 0 || ndefLen > 0x7FFF) return null;
+            if (ndefLen <= 0) return new NdefReadResult(NdefReadStatus.NotFound, null);
+            if (ndefLen > 0x7FFF) return new NdefReadResult(NdefReadStatus.ReadFailed, null);
 
             var data = new List<byte>(ndefLen);
             int offset = 2;
@@ -182,26 +208,30 @@ internal static class Program
                 int remaining = ndefLen - data.Count;
                 int chunk = Math.Min(remaining, maxLe);
                 resp = Transmit(reader, new byte[] { 0x00, 0xB0, (byte)(offset >> 8), (byte)(offset & 0xFF), (byte)chunk });
-                if (!IsOk(resp) || resp!.Length < chunk + 2) return null;
+                if (!IsOk(resp) || resp!.Length < chunk + 2) return new NdefReadResult(NdefReadStatus.ReadFailed, null);
                 for (int i = 0; i < chunk; i++) data.Add(resp[i]);
                 offset += chunk;
             }
-            return data.ToArray();
+            return new NdefReadResult(NdefReadStatus.Success, data.ToArray());
         }
         catch
         {
-            return null;
+            return new NdefReadResult(NdefReadStatus.ReadFailed, null);
         }
     }
 
-    private static byte[]? TryReadType2(ICardReader reader)
+    private static NdefReadResult TryReadType2(ICardReader reader)
     {
         try
         {
             var cc = Transmit(reader, new byte[] { 0xFF, 0xB0, 0x00, 0x03, 0x04 });
-            if (!IsOk(cc) || cc!.Length < 4 + 2 || cc[0] != 0xE1) return null;
+            if (cc is null) return new NdefReadResult(NdefReadStatus.ReadFailed, null);
+            if (!IsOk(cc)) return new NdefReadResult(NdefReadStatus.NotFound, null);
+            if (cc.Length < 4 + 2) return new NdefReadResult(NdefReadStatus.ReadFailed, null);
+            if (cc[0] != 0xE1) return new NdefReadResult(NdefReadStatus.NotFound, null);
             int dataSize = cc[2] * 8;
-            if (dataSize <= 0 || dataSize > 8192) return null;
+            if (dataSize <= 0) return new NdefReadResult(NdefReadStatus.NotFound, null);
+            if (dataSize > 8192) return new NdefReadResult(NdefReadStatus.ReadFailed, null);
 
             var data = new List<byte>(dataSize);
             int page = 4;
@@ -210,7 +240,7 @@ internal static class Program
                 int remaining = dataSize - data.Count;
                 int chunk = Math.Min(remaining, 16);
                 var resp = Transmit(reader, new byte[] { 0xFF, 0xB0, 0x00, (byte)page, (byte)chunk });
-                if (!IsOk(resp) || resp!.Length < chunk + 2) break;
+                if (!IsOk(resp) || resp!.Length < chunk + 2) return new NdefReadResult(NdefReadStatus.ReadFailed, null);
                 for (int i = 0; i < chunk; i++) data.Add(resp[i]);
                 page += chunk / 4;
             }
@@ -220,12 +250,12 @@ internal static class Program
             {
                 byte tag = data[idx];
                 if (tag == 0x00) { idx++; continue; }
-                if (tag == 0xFE) return null;
-                if (idx + 1 >= data.Count) return null;
+                if (tag == 0xFE) return new NdefReadResult(NdefReadStatus.NotFound, null);
+                if (idx + 1 >= data.Count) return new NdefReadResult(NdefReadStatus.ReadFailed, null);
                 int len, hdr;
                 if (data[idx + 1] == 0xFF)
                 {
-                    if (idx + 3 >= data.Count) return null;
+                    if (idx + 3 >= data.Count) return new NdefReadResult(NdefReadStatus.ReadFailed, null);
                     len = (data[idx + 2] << 8) | data[idx + 3];
                     hdr = 4;
                 }
@@ -236,18 +266,18 @@ internal static class Program
                 }
                 if (tag == 0x03)
                 {
-                    if (idx + hdr + len > data.Count) return null;
+                    if (idx + hdr + len > data.Count) return new NdefReadResult(NdefReadStatus.ReadFailed, null);
                     var ndef = new byte[len];
                     data.CopyTo(idx + hdr, ndef, 0, len);
-                    return ndef;
+                    return new NdefReadResult(NdefReadStatus.Success, ndef);
                 }
                 idx += hdr + len;
             }
-            return null;
+            return new NdefReadResult(NdefReadStatus.NotFound, null);
         }
         catch
         {
-            return null;
+            return new NdefReadResult(NdefReadStatus.ReadFailed, null);
         }
     }
 
@@ -346,7 +376,31 @@ internal static class Program
         }
     }
 
+    private static void BroadcastReadError(string code)
+    {
+        Log($"[READ] -> {ReadSockets.Count} client(s): {code}");
+        BroadcastRead(code);
+    }
+
     private static string Truncate(string s) => s.Length <= 60 ? s : s[..60] + "...";
 
     private static void Log(string msg) => Console.WriteLine($"{DateTime.Now:HH:mm:ss} {msg}");
+
+    private enum ReadTextStatus
+    {
+        Success,
+        NoTextRecord,
+        ReadFailed
+    }
+
+    private readonly record struct ReadTextResult(ReadTextStatus Status, string Text);
+
+    private enum NdefReadStatus
+    {
+        Success,
+        NotFound,
+        ReadFailed
+    }
+
+    private readonly record struct NdefReadResult(NdefReadStatus Status, byte[]? Data);
 }
