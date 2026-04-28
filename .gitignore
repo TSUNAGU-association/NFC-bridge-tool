@@ -1,0 +1,8 @@
+# Build outputs
+bin/
+obj/
+dist/
+dist-multi/
+
+# Packaged artifacts
+*.zip
