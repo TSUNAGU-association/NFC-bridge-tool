@@ -40,14 +40,24 @@ internal static class Program
         await CheckAndApplyUpdateAsync();
 
         StartReadWebSocketServer();
-        OpenDashboardUrl();
+        var autoLoginEnabled = AdminAutoLoginService.TryCreate(Log, out var autoLoginService);
+        if (!autoLoginEnabled)
+        {
+            OpenDashboardUrl();
+        }
 
         try
         {
-            await RunNfcLoopAsync(cts.Token);
+            var nfcTask = RunNfcLoopAsync(cts.Token);
+            var autoLoginTask = autoLoginService?.RunAsync(cts.Token) ?? Task.CompletedTask;
+            await Task.WhenAll(nfcTask, autoLoginTask);
         }
         catch (OperationCanceledException)
         {
+        }
+        finally
+        {
+            autoLoginService?.Dispose();
         }
 
         Log("[APP] 終了処理を開始します");

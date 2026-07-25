@@ -83,6 +83,58 @@ ws.onmessage = (event) => console.log(event.data);
 - 失敗時は警告ログのみ出して通常起動を続行します。
 - 環境変数 `NFC_BRIDGE_SKIP_UPDATE=1` で更新チェックをスキップできます。
 
+## Admin自動ログイン・ログアウト
+
+`NFC_BRIDGE_ADMIN_AUTO_LOGIN=1` を設定すると、Bridgeは通常ブラウザでダッシュボードを開く代わりに、Pocket IDのClient CredentialsでBridge用アクセストークンを取得し、BackendのBridgeログイン交換APIから短寿命の`launch_url`を取得します。そのURLを専用Chromeプロファイルのアプリモードで開きます。
+
+- ログイン時刻の既定値は毎日08:00です。
+- ログアウト時刻を設定すると、同じ専用ChromeプロファイルでAdminのログアウトページを開いてローカルJWTを削除してから、Bridgeが起動した専用Chromeだけを終了します。利用者の通常Chromeは終了しません。
+- Bridge終了時にも専用Chromeを終了します。
+- ログイン時刻後にBridgeを起動した場合、その日のログアウト時刻前であれば直ちにログインします。
+- 失敗時は30秒ごとに再試行します。
+- Backendから返された`launch_url`はHTTPSかつ設定したAdmin originと一致する場合のみ開きます。
+- Client secret、アクセストークン、起動URLはログへ出力しません。
+
+必須環境変数:
+
+```text
+NFC_BRIDGE_ADMIN_AUTO_LOGIN=1
+NFC_BRIDGE_POCKETID_CLIENT_ID=<Pocket ID confidential client ID>
+NFC_BRIDGE_POCKETID_CLIENT_SECRET=<Pocket ID client secret>
+NFC_BRIDGE_POCKETID_RESOURCE=<Backend API resource>
+NFC_BRIDGE_LOGIN_EXCHANGE_URL=https://api.example.com/api/v1/auth/bridge/login
+NFC_BRIDGE_DEVICE_ID=mid-terminal-01
+```
+
+任意環境変数:
+
+```text
+NFC_BRIDGE_AUTO_LOGIN_TIME=08:00
+NFC_BRIDGE_AUTO_LOGOUT_TIME=20:00
+NFC_BRIDGE_POCKETID_TOKEN_URL=https://id.tl.tsunagu-sep.org/api/oidc/token
+NFC_BRIDGE_POCKETID_SCOPE=admin:bridge-login
+NFC_BRIDGE_ADMIN_ORIGIN=https://admin.tl.tsunagu-sep.org
+NFC_BRIDGE_ADMIN_LOGOUT_URL=https://admin.tl.tsunagu-sep.org/logout/callback
+NFC_BRIDGE_CHROME_PATH=C:\Program Files\Google\Chrome\Application\chrome.exe
+NFC_BRIDGE_BROWSER_PROFILE_DIR=C:\NfcBridge\admin-browser-profile
+```
+
+Bridgeログイン交換API契約:
+
+```http
+POST /api/v1/auth/bridge/login
+Authorization: Bearer <Pocket ID M2M access token>
+Content-Type: application/json
+
+{"device_id":"mid-terminal-01"}
+```
+
+```json
+{"launch_url":"https://admin.tl.tsunagu-sep.org/auth/bridge?code=<short-lived-one-time-code>"}
+```
+
+BackendはPocket IDアクセストークンの署名、issuer、audience、`admin:bridge-login` permissionを検証し、起動URLには短寿命かつ一度だけ利用可能なコードを使用してください。BridgeへAdminの長寿命JWTを直接返さないでください。
+
 ## ログ
 
 ログは標準出力に出ます。主な prefix は以下です。
@@ -91,6 +143,7 @@ ws.onmessage = (event) => console.log(event.data);
 - `[NFC]`: リーダー検出、カード monitor
 - `[APP]`: アプリのライフサイクル
 - `[UPDATE]`: 起動時の自動更新チェック / 適用
+- `[AUTH]`: Admin自動ログイン / ログアウト
 
 ## 注意点
 
