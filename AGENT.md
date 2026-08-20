@@ -88,11 +88,13 @@ ws.onmessage = (event) => console.log(event.data);
 `NFC_BRIDGE_ADMIN_AUTO_LOGIN=1` を設定すると、Bridgeは通常ブラウザでダッシュボードを開く代わりに、Pocket IDのClient CredentialsでBridge用アクセストークンを取得し、BackendのBridgeログイン交換APIから短寿命の`launch_url`を取得します。そのURLを専用Chromeプロファイルのアプリモードで開きます。
 
 - ログイン時刻の既定値は毎日08:00です。
-- ログアウト時刻を設定すると、同じ専用ChromeプロファイルでAdminのログアウトページを開いてローカルJWTを削除してから、Bridgeが起動した専用Chromeだけを終了します。利用者の通常Chromeは終了しません。
+- ログアウト時刻を設定すると、専用ChromeプロファイルでAdminのログアウトページを開いた後（best-effort）、専用プロファイルを使用している全Chromeプロセスを終了し、最後に専用プロファイルディレクトリ自体を削除します。プロファイル削除により、ログアウトページの成否に関わらずローカルJWTが残らないことを保証します。利用者の通常Chromeは終了しません。
+- 専用Chromeの特定はプロセスハンドルではなく、コマンドラインに専用`--user-data-dir`を含むchrome.exeをWMIで列挙して行います。Bridgeを再起動しても前回起動した専用Chromeを終了・ログアウトできます。ログイン時の起動前にも同じ方法で残存プロセスを終了するため、Chromeが既存プロセスへdelegateして追跡不能になることはありません。
+- ログアウト（プロファイル削除）に失敗した場合は30秒ごとに再試行します。
 - Bridge終了時にも専用Chromeを終了します。
 - ログイン時刻後にBridgeを起動した場合、その日のログアウト時刻前であれば直ちにログインします。
 - 失敗時は30秒ごとに再試行します。
-- Backendから返された`launch_url`はHTTPSかつ設定したAdmin originと一致する場合のみ開きます。
+- Backendから返された`launch_url`は、HTTPSかつ設定したAdmin originと一致し、さらにパスが`NFC_BRIDGE_ADMIN_LAUNCH_PATH`（既定 `/auth/bridge`）と一致する場合のみ開きます。
 - Client secret、アクセストークン、起動URLはログへ出力しません。
 
 必須環境変数:
@@ -114,6 +116,7 @@ NFC_BRIDGE_AUTO_LOGOUT_TIME=20:00
 NFC_BRIDGE_POCKETID_TOKEN_URL=https://id.tl.tsunagu-sep.org/api/oidc/token
 NFC_BRIDGE_POCKETID_SCOPE=admin:bridge-login
 NFC_BRIDGE_ADMIN_ORIGIN=https://admin.tl.tsunagu-sep.org
+NFC_BRIDGE_ADMIN_LAUNCH_PATH=/auth/bridge
 NFC_BRIDGE_ADMIN_LOGOUT_URL=https://admin.tl.tsunagu-sep.org/logout/callback
 NFC_BRIDGE_CHROME_PATH=C:\Program Files\Google\Chrome\Application\chrome.exe
 NFC_BRIDGE_BROWSER_PROFILE_DIR=C:\NfcBridge\admin-browser-profile

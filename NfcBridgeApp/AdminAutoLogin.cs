@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Globalization;
+using System.Management;
 using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
@@ -9,6 +10,7 @@ internal sealed class AdminAutoLoginService : IDisposable
     private const string DefaultTokenEndpoint = "https://id.tl.tsunagu-sep.org/api/oidc/token";
     private const string DefaultAdminOrigin = "https://admin.tl.tsunagu-sep.org";
     private const string DefaultScope = "admin:bridge-login";
+    private const string DefaultLaunchPath = "/auth/bridge";
     private static readonly TimeSpan LoopInterval = TimeSpan.FromSeconds(30);
 
     private readonly AdminAutoLoginOptions _options;
@@ -64,9 +66,15 @@ internal sealed class AdminAutoLoginService : IDisposable
                 currentTime >= logoutTime &&
                 _lastLogoutDate != today)
             {
-                await LogoutAndCloseAdminBrowserAsync(cancellationToken);
-                _lastLogoutDate = today;
-                _log("[AUTH] 自動ログアウト時刻のためAdminブラウザを終了しました");
+                if (await TryLogoutAsync(cancellationToken))
+                {
+                    _lastLogoutDate = today;
+                    _log("[AUTH] 自動ログアウト時刻のためAdminブラウザを終了しセッションを削除しました");
+                }
+                else
+                {
+                    _log("[AUTH] 自動ログアウトを完了できませんでした; 30秒後に再試行します");
+                }
             }
 
             var beforeLogout = _options.LogoutTime is null || currentTime < _options.LogoutTime.Value;
@@ -85,6 +93,7 @@ internal sealed class AdminAutoLoginService : IDisposable
     public void Dispose()
     {
         CloseAdminBrowser();
+        KillChromeUsingProfile();
         _http.Dispose();
     }
 
@@ -110,6 +119,10 @@ internal sealed class AdminAutoLoginService : IDisposable
             }
 
             CloseAdminBrowser();
+            // 前回のBridgeプロセスが残した専用Chromeがいると、Process.Startが
+            // そのプロセスへdelegateして_browserProcessが実体と一致しなくなるため、
+            // 起動前にプロファイルを使用中のChromeを必ず終了させる
+            KillChromeUsingProfile();
             Directory.CreateDirectory(_options.BrowserProfileDirectory);
 
             var startInfo = new ProcessStartInfo
@@ -199,7 +212,8 @@ internal sealed class AdminAutoLoginService : IDisposable
     private bool IsAllowedLaunchUrl(Uri launchUrl) =>
         launchUrl.Scheme == Uri.UriSchemeHttps &&
         string.Equals(launchUrl.Host, _options.AdminOrigin.Host, StringComparison.OrdinalIgnoreCase) &&
-        launchUrl.Port == _options.AdminOrigin.Port;
+        launchUrl.Port == _options.AdminOrigin.Port &&
+        string.Equals(launchUrl.AbsolutePath, _options.LaunchPath, StringComparison.Ordinal);
 
     private string? FindChromeExecutable()
     {
@@ -217,14 +231,18 @@ internal sealed class AdminAutoLoginService : IDisposable
         return candidates.FirstOrDefault(File.Exists);
     }
 
-    private async Task LogoutAndCloseAdminBrowserAsync(CancellationToken cancellationToken)
+    private async Task<bool> TryLogoutAsync(CancellationToken cancellationToken)
     {
-        if (_browserProcess is null || _browserProcess.HasExited)
+        // プロファイルが存在しなければローカルセッションも存在しない
+        if (!Directory.Exists(_options.BrowserProfileDirectory))
         {
             CloseAdminBrowser();
-            return;
+            return true;
         }
 
+        // best-effort: Adminのログアウトページを開いてサーバー側・Admin側の
+        // 後片付けを促す。同じuser-data-dirなので稼働中の専用Chromeがあれば
+        // そこで開き、無ければ一時的に起動される
         var chromePath = FindChromeExecutable();
         if (chromePath is not null)
         {
@@ -239,7 +257,7 @@ internal sealed class AdminAutoLoginService : IDisposable
                 startInfo.ArgumentList.Add($"--user-data-dir={_options.BrowserProfileDirectory}");
                 startInfo.ArgumentList.Add("--no-first-run");
                 using var logoutProcess = Process.Start(startInfo);
-                await Task.Delay(TimeSpan.FromSeconds(2), cancellationToken);
+                await Task.Delay(TimeSpan.FromSeconds(3), cancellationToken);
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
@@ -252,6 +270,86 @@ internal sealed class AdminAutoLoginService : IDisposable
         }
 
         CloseAdminBrowser();
+        KillChromeUsingProfile();
+
+        // ログアウトページの成否に関わらず、プロファイル削除で
+        // ローカルJWTが残らないことを保証する
+        return await TryDeleteProfileDirectoryAsync(cancellationToken);
+    }
+
+    private void KillChromeUsingProfile()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        try
+        {
+            using var searcher = new ManagementObjectSearcher(
+                "SELECT ProcessId, CommandLine FROM Win32_Process WHERE Name = 'chrome.exe'");
+            foreach (var item in searcher.Get())
+            {
+                if (item["CommandLine"] is not string commandLine ||
+                    !commandLine.Contains(_options.BrowserProfileDirectory, StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                try
+                {
+                    using var process = Process.GetProcessById(Convert.ToInt32(item["ProcessId"], CultureInfo.InvariantCulture));
+                    process.Kill(entireProcessTree: true);
+                    process.WaitForExit(5000);
+                }
+                catch (ArgumentException)
+                {
+                    // 既に終了している
+                }
+                catch (InvalidOperationException)
+                {
+                    // 既に終了している
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _log($"[AUTH] 専用Chromeプロセスの列挙に失敗しました: {ex.Message}");
+        }
+    }
+
+    private async Task<bool> TryDeleteProfileDirectoryAsync(CancellationToken cancellationToken)
+    {
+        for (var attempt = 1; attempt <= 3; attempt++)
+        {
+            try
+            {
+                if (!Directory.Exists(_options.BrowserProfileDirectory))
+                {
+                    return true;
+                }
+
+                Directory.Delete(_options.BrowserProfileDirectory, recursive: true);
+                return true;
+            }
+            catch (DirectoryNotFoundException)
+            {
+                return true;
+            }
+            catch (Exception ex)
+            {
+                if (attempt == 3)
+                {
+                    _log($"[AUTH] 専用Chromeプロファイルを削除できませんでした: {ex.Message}");
+                    return false;
+                }
+
+                // Chromeのファイルロック解放待ち
+                await Task.Delay(TimeSpan.FromSeconds(1), cancellationToken);
+            }
+        }
+
+        return false;
     }
 
     private void CloseAdminBrowser()
@@ -303,6 +401,7 @@ internal sealed class AdminAutoLoginService : IDisposable
         string Scope,
         Uri ExchangeEndpoint,
         Uri AdminOrigin,
+        string LaunchPath,
         Uri LogoutUrl,
         string DeviceId,
         string? ChromePath,
@@ -361,6 +460,17 @@ internal sealed class AdminAutoLoginService : IDisposable
                 error = "NFC_BRIDGE_ADMIN_ORIGIN must be an absolute HTTPS URL";
                 return false;
             }
+            var launchPath = Environment.GetEnvironmentVariable("NFC_BRIDGE_ADMIN_LAUNCH_PATH");
+            if (string.IsNullOrWhiteSpace(launchPath))
+            {
+                launchPath = DefaultLaunchPath;
+            }
+            else if (!launchPath.StartsWith('/'))
+            {
+                error = "NFC_BRIDGE_ADMIN_LAUNCH_PATH must start with '/'";
+                return false;
+            }
+
             var defaultLogoutUrl = new Uri(adminOrigin!, "/logout/callback").AbsoluteUri;
             if (!TryReadHttpsUri("NFC_BRIDGE_ADMIN_LOGOUT_URL", defaultLogoutUrl, out var logoutUrl) ||
                 !HasSameOrigin(logoutUrl!, adminOrigin!))
@@ -390,6 +500,7 @@ internal sealed class AdminAutoLoginService : IDisposable
                 string.IsNullOrWhiteSpace(scope) ? DefaultScope : scope.Trim(),
                 exchangeEndpoint,
                 adminOrigin!,
+                launchPath.Trim(),
                 logoutUrl!,
                 deviceId!,
                 string.IsNullOrWhiteSpace(chromePath) ? null : chromePath.Trim(),
