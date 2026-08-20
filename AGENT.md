@@ -74,7 +74,7 @@ ws.onmessage = (event) => console.log(event.data);
 バージョンは csproj の `<Version>` で定義し、リリースビルドではタグ名から `release.yml` が `-p:Version` を上書きします。
 
 起動直後に GitHub Releases (`TSUNAGU-association/NFC-bridge-tool`) の `latest` を確認し、新しいバージョンがあれば自動で適用します。
-最新版だった場合は管理ダッシュボード (`https://admin.tl.tsunagu-sep.org/admin/dashboard`) を既定ブラウザで自動的に開きます。更新適用時は再起動後の起動で同じフローによりブラウザが開きます。
+最新版だった場合はMID.スキャナー (`https://admin.tl.tsunagu-sep.org/leader/scanner?location_id=1`) を既定ブラウザで自動的に開きます。`location_id` は端末の設置場所ごとに異なるため、環境変数 `NFC_BRIDGE_SCANNER_URL` でURL全体を上書きできます。更新適用時は再起動後の起動で同じフローによりブラウザが開きます。
 
 - 取得元: `https://api.github.com/repos/TSUNAGU-association/NFC-bridge-tool/releases/latest`
 - 対象アセット: `NfcBridgeApp-win-x64-*.zip`
@@ -85,7 +85,7 @@ ws.onmessage = (event) => console.log(event.data);
 
 ## Admin自動ログイン・ログアウト
 
-`NFC_BRIDGE_ADMIN_AUTO_LOGIN=1` を設定すると、Bridgeは通常ブラウザでダッシュボードを開く代わりに、Pocket IDのClient CredentialsでBridge用アクセストークンを取得し、BackendのBridgeログイン交換APIから短寿命の`launch_url`を取得します。そのURLを専用Chromeプロファイルのアプリモードで開きます。
+`NFC_BRIDGE_ADMIN_AUTO_LOGIN=1` を設定すると、Bridgeは通常ブラウザでMID.スキャナーを開く代わりに、Pocket IDのClient CredentialsでBridge用アクセストークンを取得し、BackendのBridgeログイン交換APIから短寿命の`launch_url`を取得します。そのURLを専用Chromeプロファイルのアプリモードで開きます。Admin側はコード交換後にMID.スキャナー（`/leader/scanner?location_id=<設置場所ID>`）へ遷移してください。
 
 - ログイン時刻の既定値は毎日08:00です。
 - ログアウト時刻を設定すると、専用ChromeプロファイルでAdminのログアウトページを開いた後（best-effort）、専用プロファイルを使用している全Chromeプロセスを終了し、最後に専用プロファイルディレクトリ自体を削除します。プロファイル削除により、ログアウトページの成否に関わらずローカルJWTが残らないことを保証します。利用者の通常Chromeは終了しません。
