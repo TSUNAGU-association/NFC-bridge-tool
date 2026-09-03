@@ -74,7 +74,7 @@ ws.onmessage = (event) => console.log(event.data);
 バージョンは csproj の `<Version>` で定義し、リリースビルドではタグ名から `release.yml` が `-p:Version` を上書きします。
 
 起動直後に GitHub Releases (`TSUNAGU-association/NFC-bridge-tool`) の `latest` を確認し、新しいバージョンがあれば自動で適用します。
-最新版だった場合は管理ダッシュボード (`https://admin.tl.tsunagu-sep.org/admin/dashboard`) を既定ブラウザで自動的に開きます。更新適用時は再起動後の起動で同じフローによりブラウザが開きます。
+最新版だった場合はMID.スキャナー (`https://admin.tl.tsunagu-sep.org/leader/scanner?location_id=1`) を既定ブラウザで自動的に開きます。`location_id` は端末の設置場所ごとに異なるため、環境変数 `NFC_BRIDGE_SCANNER_URL` でURL全体を上書きできます。更新適用時は再起動後の起動で同じフローによりブラウザが開きます。
 
 - 取得元: `https://api.github.com/repos/TSUNAGU-association/NFC-bridge-tool/releases/latest`
 - 対象アセット: `NfcBridgeApp-win-x64-*.zip`
@@ -82,6 +82,114 @@ ws.onmessage = (event) => console.log(event.data);
 - フロー: zip を `%TEMP%/NfcBridgeApp-update-<guid>/` に DL → 展開 → `apply-update.bat` を hidden 起動 → 自プロセス終了 → bat が `tasklist` で終了を待ち、`robocopy /E` でインストール先を上書き → 新 exe を起動して staging を削除。
 - 失敗時は警告ログのみ出して通常起動を続行します。
 - 環境変数 `NFC_BRIDGE_SKIP_UPDATE=1` で更新チェックをスキップできます。
+
+## Admin自動ログイン・ログアウト
+
+`NFC_BRIDGE_ADMIN_AUTO_LOGIN=1` を設定すると、Bridgeは通常ブラウザでMID.スキャナーを開く代わりに、Pocket IDのClient CredentialsでBridge用アクセストークンを取得し、BackendのBridgeログイン交換APIから短寿命の`launch_url`を取得します。そのURLを専用Chromeプロファイルのアプリモードで開きます。Admin側はコード交換後にMID.スキャナー（`/leader/scanner?location_id=<設置場所ID>`）へ遷移してください。
+
+- ログイン時刻の既定値は毎日08:00です。
+- ログアウト時刻を設定すると、専用ChromeプロファイルでAdminのログアウトページを開いた後（best-effort）、専用プロファイルを使用している全Chromeプロセスを終了し、最後に専用プロファイルディレクトリ自体を削除します。プロファイル削除により、ログアウトページの成否に関わらずローカルJWTが残らないことを保証します。利用者の通常Chromeは終了しません。
+- 専用Chromeの特定はプロセスハンドルではなく、コマンドラインに専用`--user-data-dir`を含むchrome.exeをWMIで列挙して行います。Bridgeを再起動しても前回起動した専用Chromeを終了・ログアウトできます。ログイン時の起動前にも同じ方法で残存プロセスを終了するため、Chromeが既存プロセスへdelegateして追跡不能になることはありません。
+- ログアウト（プロファイル削除）に失敗した場合は30秒ごとに再試行します。
+- Bridge終了時にも専用Chromeを終了します。
+- ログイン時刻後にBridgeを起動した場合、その日のログアウト時刻前であれば直ちにログインします。
+- 失敗時は30秒ごとに再試行します。
+- Backendから返された`launch_url`は、HTTPSかつ設定したAdmin originと一致し、さらにパスが`NFC_BRIDGE_ADMIN_LAUNCH_PATH`（既定 `/auth/bridge`）と一致する場合のみ開きます。
+- Client secret、アクセストークン、起動URLはログへ出力しません。
+
+必須環境変数:
+
+```text
+NFC_BRIDGE_ADMIN_AUTO_LOGIN=1
+NFC_BRIDGE_POCKETID_CLIENT_ID=<Pocket ID confidential client ID>
+NFC_BRIDGE_POCKETID_CLIENT_SECRET=<Pocket ID client secret>
+NFC_BRIDGE_POCKETID_RESOURCE=<Backend API resource>
+NFC_BRIDGE_LOGIN_EXCHANGE_URL=https://api.example.com/api/v1/auth/bridge/login
+NFC_BRIDGE_DEVICE_ID=mid-terminal-01
+```
+
+任意環境変数:
+
+```text
+NFC_BRIDGE_AUTO_LOGIN_TIME=08:00
+NFC_BRIDGE_AUTO_LOGOUT_TIME=20:00
+NFC_BRIDGE_POCKETID_TOKEN_URL=https://id.tl.tsunagu-sep.org/api/oidc/token
+NFC_BRIDGE_POCKETID_SCOPE=admin:bridge-login
+NFC_BRIDGE_ADMIN_ORIGIN=https://admin.tl.tsunagu-sep.org
+NFC_BRIDGE_ADMIN_LAUNCH_PATH=/auth/bridge
+NFC_BRIDGE_ADMIN_LOGOUT_URL=https://admin.tl.tsunagu-sep.org/logout/callback
+NFC_BRIDGE_CHROME_PATH=C:\Program Files\Google\Chrome\Application\chrome.exe
+NFC_BRIDGE_BROWSER_PROFILE_DIR=C:\NfcBridge\admin-browser-profile
+```
+
+Bridgeログイン交換API契約:
+
+```http
+POST /api/v1/auth/bridge/login
+Authorization: Bearer <Pocket ID M2M access token>
+Content-Type: application/json
+
+{"device_id":"mid-terminal-01"}
+```
+
+```json
+{"launch_url":"https://admin.tl.tsunagu-sep.org/auth/bridge?code=<short-lived-one-time-code>"}
+```
+
+BackendはPocket IDアクセストークンの署名、issuer、audience、`admin:bridge-login` permissionを検証し、起動URLには短寿命かつ一度だけ利用可能なコードを使用してください。BridgeへAdminの長寿命JWTを直接返さないでください。
+
+## 設定ファイル（.env）と Infisical 連携
+
+起動直後（自動更新チェックより前）に `.env` を読み込み、プロセス環境変数として適用します。上記の `NFC_BRIDGE_*` 環境変数はすべて `.env` でも設定できます。
+
+- 既定パス: `NfcBridgeApp.exe` と同じディレクトリの `.env`
+- `NFC_BRIDGE_ENV_FILE` でパスを上書きできます（指定パスが存在しない場合は警告ログ）
+- **実環境変数が常に優先**です。`.env` は未設定のキーにのみ適用されます（端末個別の一時上書き用）
+- 書式: `KEY=VALUE`。空行と `#` コメント、`export ` prefix を許容し、値の前後の `"` / `'` は除去します
+- `.env` のキー名・値はログへ出力しません（適用件数のみ出力）
+- 自動更新の `robocopy /E` は staging に無いファイルを削除しないため、exe 横の `.env` は更新後も保持されます
+- `.env` が無い場合は従来どおり環境変数のみで動作します
+
+### Infisical Agent での運用例
+
+拠点ごとに異なる値（`NFC_BRIDGE_DEVICE_ID` / `NFC_BRIDGE_SCANNER_URL` など）と共通シークレット（Pocket ID クレデンシャル等）を Infisical で一元管理し、各端末では Infisical Agent が `.env` をレンダリングします。Bridge 自体は Infisical に依存しません。
+
+推奨構成: 共通値をルートフォルダ（例 `/bridge`）に置き、拠点ごとのフォルダ（例 `/bridge/sites/mid-terminal-01`）に端末固有値を置いて secret import で共通値を取り込みます。端末には Machine Identity（Universal Auth の client ID / secret）のみ配布します。
+
+`agent-config.yaml` の例:
+
+```yaml
+infisical:
+  address: "https://app.infisical.com"
+auth:
+  type: "universal-auth"
+  config:
+    client-id:
+      type: "file"
+      config:
+        path: "C:\\NfcBridge\\infisical\\client-id"
+    client-secret:
+      type: "file"
+      config:
+        path: "C:\\NfcBridge\\infisical\\client-secret"
+templates:
+  - source-path: "C:\\NfcBridge\\infisical\\env.tpl"
+    destination-path: "C:\\NfcBridge\\app\\.env"
+    config:
+      polling-interval: 60s
+```
+
+`env.tpl` の例（`<project-id>` と拠点フォルダは端末に合わせて変更）:
+
+```text
+{{- with secret "<project-id>" "prod" "/bridge/sites/mid-terminal-01" }}
+{{- range . }}
+{{ .Key }}={{ .Value }}
+{{- end }}
+{{- end }}
+```
+
+Agent はシークレット変更時に `.env` を再レンダリングしますが、Bridge が読むのは起動時のみです。値の変更を反映するには Bridge を再起動してください。
 
 ## ログ
 
@@ -91,6 +199,7 @@ ws.onmessage = (event) => console.log(event.data);
 - `[NFC]`: リーダー検出、カード monitor
 - `[APP]`: アプリのライフサイクル
 - `[UPDATE]`: 起動時の自動更新チェック / 適用
+- `[AUTH]`: Admin自動ログイン / ログアウト
 
 ## 注意点
 

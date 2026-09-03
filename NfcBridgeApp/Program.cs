@@ -23,7 +23,15 @@ internal static class Program
     private const string SkipUpdateEnvVar = "NFC_BRIDGE_SKIP_UPDATE";
     private const string ReleaseAssetPrefix = "NfcBridgeApp-win-x64-";
 
-    private const string DashboardUrl = "https://admin.tl.tsunagu-sep.org/admin/dashboard";
+    private const string DefaultScannerUrl = "https://admin.tl.tsunagu-sep.org/leader/scanner?location_id=1";
+    private const string ScannerUrlEnvVar = "NFC_BRIDGE_SCANNER_URL";
+
+    // location_idは端末の設置場所ごとに異なるためenvで上書き可能にする。
+    // static初期化はMain冒頭の.env読み込みより先に走るため、呼び出し時に解決する
+    private static string ScannerUrl =>
+        Environment.GetEnvironmentVariable(ScannerUrlEnvVar) is { Length: > 0 } overridden
+            ? overridden
+            : DefaultScannerUrl;
 
     private static readonly ConcurrentDictionary<Guid, IWebSocketConnection> ReadSockets = new();
     private static readonly object DedupLock = new();
@@ -37,17 +45,28 @@ internal static class Program
         AppDomain.CurrentDomain.ProcessExit += (_, _) => cts.Cancel();
 
         Log($"[APP] NfcBridgeApp v{GetCurrentVersion()}");
+        EnvFile.Load(Log);
         await CheckAndApplyUpdateAsync();
 
         StartReadWebSocketServer();
-        OpenDashboardUrl();
+        var autoLoginEnabled = AdminAutoLoginService.TryCreate(Log, out var autoLoginService);
+        if (!autoLoginEnabled)
+        {
+            OpenScannerUrl();
+        }
 
         try
         {
-            await RunNfcLoopAsync(cts.Token);
+            var nfcTask = RunNfcLoopAsync(cts.Token);
+            var autoLoginTask = autoLoginService?.RunAsync(cts.Token) ?? Task.CompletedTask;
+            await Task.WhenAll(nfcTask, autoLoginTask);
         }
         catch (OperationCanceledException)
         {
+        }
+        finally
+        {
+            autoLoginService?.Dispose();
         }
 
         Log("[APP] 終了処理を開始します");
@@ -453,7 +472,7 @@ internal static class Program
 
     private static void Log(string msg) => Console.WriteLine($"{DateTime.Now:HH:mm:ss} {msg}");
 
-    private static void OpenDashboardUrl()
+    private static void OpenScannerUrl()
     {
         try
         {
@@ -461,28 +480,28 @@ internal static class Program
             {
                 Process.Start(new ProcessStartInfo
                 {
-                    FileName = DashboardUrl,
+                    FileName = ScannerUrl,
                     UseShellExecute = true,
                 });
             }
             else if (OperatingSystem.IsMacOS())
             {
-                Process.Start("open", DashboardUrl);
+                Process.Start("open", ScannerUrl);
             }
             else if (OperatingSystem.IsLinux())
             {
-                Process.Start("xdg-open", DashboardUrl);
+                Process.Start("xdg-open", ScannerUrl);
             }
             else
             {
-                Log($"[APP] このOSではブラウザを自動で開けません: {DashboardUrl}");
+                Log($"[APP] このOSではブラウザを自動で開けません: {ScannerUrl}");
                 return;
             }
-            Log($"[APP] ダッシュボードを開きました: {DashboardUrl}");
+            Log($"[APP] MID.スキャナーを開きました: {ScannerUrl}");
         }
         catch (Exception ex)
         {
-            Log($"[APP] ダッシュボードの起動に失敗しました: {ex.Message}");
+            Log($"[APP] MID.スキャナーの起動に失敗しました: {ex.Message}");
         }
     }
 

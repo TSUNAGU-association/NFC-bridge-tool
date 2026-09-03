@@ -6,3 +6,6 @@ dist-multi/
 
 # Packaged artifacts
 *.zip
+
+# Local / Infisical Agent rendered config
+.env
