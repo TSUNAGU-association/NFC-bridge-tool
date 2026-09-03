@@ -138,6 +138,59 @@ Content-Type: application/json
 
 BackendはPocket IDアクセストークンの署名、issuer、audience、`admin:bridge-login` permissionを検証し、起動URLには短寿命かつ一度だけ利用可能なコードを使用してください。BridgeへAdminの長寿命JWTを直接返さないでください。
 
+## 設定ファイル（.env）と Infisical 連携
+
+起動直後（自動更新チェックより前）に `.env` を読み込み、プロセス環境変数として適用します。上記の `NFC_BRIDGE_*` 環境変数はすべて `.env` でも設定できます。
+
+- 既定パス: `NfcBridgeApp.exe` と同じディレクトリの `.env`
+- `NFC_BRIDGE_ENV_FILE` でパスを上書きできます（指定パスが存在しない場合は警告ログ）
+- **実環境変数が常に優先**です。`.env` は未設定のキーにのみ適用されます（端末個別の一時上書き用）
+- 書式: `KEY=VALUE`。空行と `#` コメント、`export ` prefix を許容し、値の前後の `"` / `'` は除去します
+- `.env` のキー名・値はログへ出力しません（適用件数のみ出力）
+- 自動更新の `robocopy /E` は staging に無いファイルを削除しないため、exe 横の `.env` は更新後も保持されます
+- `.env` が無い場合は従来どおり環境変数のみで動作します
+
+### Infisical Agent での運用例
+
+拠点ごとに異なる値（`NFC_BRIDGE_DEVICE_ID` / `NFC_BRIDGE_SCANNER_URL` など）と共通シークレット（Pocket ID クレデンシャル等）を Infisical で一元管理し、各端末では Infisical Agent が `.env` をレンダリングします。Bridge 自体は Infisical に依存しません。
+
+推奨構成: 共通値をルートフォルダ（例 `/bridge`）に置き、拠点ごとのフォルダ（例 `/bridge/sites/mid-terminal-01`）に端末固有値を置いて secret import で共通値を取り込みます。端末には Machine Identity（Universal Auth の client ID / secret）のみ配布します。
+
+`agent-config.yaml` の例:
+
+```yaml
+infisical:
+  address: "https://app.infisical.com"
+auth:
+  type: "universal-auth"
+  config:
+    client-id:
+      type: "file"
+      config:
+        path: "C:\\NfcBridge\\infisical\\client-id"
+    client-secret:
+      type: "file"
+      config:
+        path: "C:\\NfcBridge\\infisical\\client-secret"
+templates:
+  - source-path: "C:\\NfcBridge\\infisical\\env.tpl"
+    destination-path: "C:\\NfcBridge\\app\\.env"
+    config:
+      polling-interval: 60s
+```
+
+`env.tpl` の例（`<project-id>` と拠点フォルダは端末に合わせて変更）:
+
+```text
+{{- with secret "<project-id>" "prod" "/bridge/sites/mid-terminal-01" }}
+{{- range . }}
+{{ .Key }}={{ .Value }}
+{{- end }}
+{{- end }}
+```
+
+Agent はシークレット変更時に `.env` を再レンダリングしますが、Bridge が読むのは起動時のみです。値の変更を反映するには Bridge を再起動してください。
+
 ## ログ
 
 ログは標準出力に出ます。主な prefix は以下です。

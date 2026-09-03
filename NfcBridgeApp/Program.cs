@@ -26,8 +26,9 @@ internal static class Program
     private const string DefaultScannerUrl = "https://admin.tl.tsunagu-sep.org/leader/scanner?location_id=1";
     private const string ScannerUrlEnvVar = "NFC_BRIDGE_SCANNER_URL";
 
-    // location_idは端末の設置場所ごとに異なるためenvで上書き可能にする
-    private static readonly string ScannerUrl =
+    // location_idは端末の設置場所ごとに異なるためenvで上書き可能にする。
+    // static初期化はMain冒頭の.env読み込みより先に走るため、呼び出し時に解決する
+    private static string ScannerUrl =>
         Environment.GetEnvironmentVariable(ScannerUrlEnvVar) is { Length: > 0 } overridden
             ? overridden
             : DefaultScannerUrl;
@@ -44,6 +45,7 @@ internal static class Program
         AppDomain.CurrentDomain.ProcessExit += (_, _) => cts.Cancel();
 
         Log($"[APP] NfcBridgeApp v{GetCurrentVersion()}");
+        EnvFile.Load(Log);
         await CheckAndApplyUpdateAsync();
 
         StartReadWebSocketServer();
